@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>壓力釋放器 (Stress Breaker)</title>
+    <!-- 載入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 載入 Tone.js (用於產生聲音) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.min.js"></script>
+    <style>
+        /* 設定字體為 Inter */
+        html { font-family: 'Inter', sans-serif; }
+        
+        /* 隱藏預設的訊息框 */
+        #message-box {
+            transition: opacity 0.3s ease-in-out, transform 0.3s ease-in-out;
+            transform: translateY(-20px);
+        }
+        .message-show {
+            opacity: 1 !important;
+            transform: translateY(0) !important;
+        }
+
+        /* 確保 Canvas 佔滿其容器 */
+        #glassCanvas {
+            cursor: crosshair;
+            display: block;
+        }
+
+        /* 互動按鈕樣式 */
+        .btn-primary {
+            @apply px-4 py-2 text-sm md:text-base font-semibold rounded-full shadow-lg transition duration-200 ease-in-out whitespace-nowrap;
+        }
+
+    </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen flex flex-col items-center justify-center p-4">
+
+    <!-- 主應用程式容器 -->
+    <div class="w-full max-w-4xl mx-auto flex flex-col items-center space-y-8">
+        
+        <h1 class="text-4xl md:text-5xl font-extrabold text-red-400 mt-8 mb-4">
+            🔨 目標釋放器 🔨
+        </h1>
+        
+        <!-- 指示區塊 -->
+        <div class="bg-gray-800 p-4 md:p-6 rounded-xl shadow-2xl w-full">
+            <p class="text-lg text-gray-300 flex items-center justify-center space-x-2 mb-4">
+                <span class="text-red-300 font-semibold text-center">
+                    步驟 1. 選擇目標或上傳圖像 | 步驟 2. 點擊目標直到它完全破碎！
+                </span>
+            </p>
+            
+            <!-- 選項按鈕 -->
+            <div class="flex flex-wrap justify-center gap-2 md:gap-4 border-b pb-4 border-gray-700">
+                <button id="selectCircle" class="btn-primary bg-blue-600 hover:bg-blue-500 text-white">圓形玻璃</button>
+                <button id="selectTarget" class="btn-primary bg-purple-600 hover:bg-purple-500 text-white">靶心圖案</button>
+                <button id="selectSquare" class="btn-primary bg-yellow-600 hover:bg-yellow-500 text-gray-900">方形玻璃</button>
+                <button id="selectHeart" class="btn-primary bg-red-600 hover:bg-red-500 text-white">💔 心碎目標</button>
+            </div>
+
+            <!-- 圖像上傳區 -->
+            <div class="flex flex-col items-center mt-4">
+                <label for="imageUpload" class="text-sm text-gray-400 mb-2">或上傳您的目標圖像 (支援 JPG/PNG):</label>
+                <input type="file" id="imageUpload" accept="image/png, image/jpeg" class="text-sm text-gray-300 p-2 rounded-lg bg-gray-700 hover:bg-gray-600 cursor-pointer w-full max-w-sm">
+            </div>
+            
+            <div class="flex justify-center mt-4">
+                <button id="resetButton" class="btn-primary bg-gray-500 hover:bg-gray-400 text-white">🎯 重置目標/畫布</button>
+            </div>
+        </div>
+
+        <!-- 虛擬玻璃/畫布區域 -->
+        <div class="w-full h-96 md:h-[480px] bg-gray-950 border-4 border-gray-700 rounded-xl overflow-hidden shadow-2xl relative">
+            <canvas id="glassCanvas" class="w-full h-full"></canvas>
+            
+            <!-- 初始提示文字 -->
+            <div id="initial-prompt" class="absolute inset-0 flex items-center justify-center transition-opacity duration-500 pointer-events-none">
+                <p class="text-gray-500 text-2xl font-light tracking-wider opacity-75 text-center px-4">
+                    請先點擊上方的按鈕或上傳圖像來選擇您的目標！
+                </p>
+            </div>
+        </div>
+
+        <!-- 訊息彈出視窗 -->
+        <div id="message-box" class="fixed top-0 mt-4 mx-auto bg-green-500 text-gray-900 font-bold py-3 px-6 rounded-full shadow-2xl opacity-0">
+            情緒已釋放！繼續點擊直到您感覺好一些！
+        </div>
+
+    </div>
+
+    <script>
+        const canvas = document.getElementById('glassCanvas');
+        const ctx = canvas.getContext('2d');
+        const messageBox = document.getElementById('message-box');
+        const initialPrompt = document.getElementById('initial-prompt');
+        const selectCircleBtn = document.getElementById('selectCircle');
+        const selectTargetBtn = document.getElementById('selectTarget');
+        const selectSquareBtn = document.getElementById('selectSquare');
+        const selectHeartBtn = document.getElementById('selectHeart');
+        const imageUploadInput = document.getElementById('imageUpload');
+        const resetButton = document.getElementById('resetButton');
+        
+        // --- 狀態管理 ---
+        let currentShape = null; // 'circle', 'target', 'square', 'heart', or 'image'
+        let target = { 
+            x: 0, y: 0, // 中心點
+            boundX: 0, boundY: 0, boundW: 0, boundH: 0, // 點擊偵測的矩形範圍
+            radius: 0, size: 0, // 繪圖尺寸
+            hits: 0, maxHits: 20, isShattered: false 
+        }; 
+        let cracks = [];
+        let uploadedImage = null; // 儲存 Image 物件
+        let isAudioReady = false;
+
+        // --- Tone.js 聲音合成器 ---
+        const breakSynth = new Tone.NoiseSynth({
+            noise: { type: "white" },
+            envelope: { attack: 0.005, decay: 0.4, sustain: 0.0, release: 0.01 }
+        }).toDestination();
+
+        // 調整 Canvas 大小並設定目標中心點
+        function resizeCanvas() {
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            
+            // 基礎尺寸設定
+            target.x = canvas.width / 2;
+            target.y = canvas.height / 2;
+            target.size = Math.min(canvas.width, canvas.height) / 3;
+            target.radius = target.size;
+
+            // 調整邊界盒 (Bound Box)
+            if (currentShape === 'square' || currentShape === 'heart' || currentShape === 'image') {
+                target.boundW = target.size * 1.5;
+                target.boundH = target.size * 1.5;
+                if (currentShape === 'image' && uploadedImage) {
+                    // 保持圖像比例，讓最長邊等於 target.size * 1.5
+                    const ratio = uploadedImage.width / uploadedImage.height;
+                    if (ratio > 1) { // 寬度大於高度
+                        target.boundW = target.size * 1.5;
+                        target.boundH = target.boundW / ratio;
+                    } else { // 高度大於或等於寬度
+                        target.boundH = target.size * 1.5;
+                        target.boundW = target.boundH * ratio;
+                    }
+                }
+                target.boundX = target.x - target.boundW / 2;
+                target.boundY = target.y - target.boundH / 2;
+            } else {
+                 // 圓形/靶心
+                target.boundW = target.radius * 2;
+                target.boundH = target.radius * 2;
+                target.boundX = target.x - target.radius;
+                target.boundY = target.y - target.radius;
+            }
+
+            draw();
+        }
+        
+        // 繪製愛心形狀
+        function drawHeartShape(x, y, size, context) {
+            context.beginPath();
+            const k = size / 2; // 縮放係數
+            context.moveTo(x, y + k / 4);
+            // 左半邊
+            context.bezierCurveTo(
+                x + k / 2, y - k,
+                x + k, y - k / 2,
+                x, y + k * 1.5 // 尖端
+            );
+            // 右半邊
+            context.bezierCurveTo(
+                x - k, y - k / 2,
+                x - k / 2, y - k,
+                x, y + k / 4
+            );
+        }
+
+        // --- 繪製目標形狀 ---
+        function drawShape() {
+            if (!currentShape) return;
+            
+            ctx.strokeStyle = `rgba(147, 197, 253, 0.9)`; // light-blue-300
+            ctx.lineWidth = 4;
+            
+            if (currentShape === 'circle') {
+                ctx.beginPath();
+                ctx.arc(target.x, target.y, target.radius, 0, Math.PI * 2);
+                ctx.stroke();
+            } else if (currentShape === 'target') {
+                for (let i = 0; i < 4; i++) {
+                    const r = target.radius * (1 - i * 0.25);
+                    ctx.beginPath();
+                    ctx.arc(target.x, target.y, r, 0, Math.PI * 2);
+                    if (i === 1 || i === 3) {
+                        ctx.fillStyle = `rgba(239, 68, 68, 0.1)`; 
+                        ctx.fill();
+                    }
+                    ctx.stroke();
+                }
+            } else if (currentShape === 'square') {
+                ctx.strokeRect(target.boundX, target.boundY, target.boundW, target.boundH);
+            } else if (currentShape === 'heart') {
+                drawHeartShape(target.x, target.y, target.size, ctx);
+                ctx.fillStyle = `rgba(239, 68, 68, 0.1)`; 
+                ctx.fill();
+                ctx.stroke();
+            } else if (currentShape === 'image' && uploadedImage) {
+                // 繪製圖像
+                ctx.drawImage(uploadedImage, target.boundX, target.boundY, target.boundW, target.boundH);
+                // 圖像邊框
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(target.boundX, target.boundY, target.boundW, target.boundH);
+            }
+            
+            // 提示點擊數 
+            if (!target.isShattered && currentShape !== 'image') {
+                 ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+                 ctx.font = '20px Inter, sans-serif';
+                 ctx.textAlign = 'center';
+                 ctx.fillText(`剩餘 ${target.maxHits - target.hits} 次敲擊`, target.x, target.y + target.size + 30);
+            } else if (!target.isShattered && currentShape === 'image') {
+                 ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                 ctx.font = '20px Inter, sans-serif';
+                 ctx.textAlign = 'center';
+                 ctx.fillText(`剩餘 ${target.maxHits - target.hits} 次敲擊 (砸爛圖像!)`, target.x, target.y + target.boundH / 2 + 30);
+            }
+        }
+
+        // --- 繪製單一裂痕 ---
+        function drawCrack(crack) {
+            ctx.beginPath();
+            
+            // 裂痕從點擊中心向外擴散
+            for (let i = 0; i < 15; i++) {
+                const angle = (Math.random() * Math.PI * 2) + crack.angleOffset + (i * 0.3);
+                const length = Math.random() * (70 + target.hits * 5) + 30; // 裂痕長度隨 hits 增加
+                
+                const endX = crack.x + Math.cos(angle) * length;
+                const endY = crack.y + Math.sin(angle) * length;
+                
+                ctx.moveTo(crack.x, crack.y);
+                ctx.lineTo(endX, endY);
+            }
+
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = crack.color;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+        }
+
+        // --- 渲染所有元素 ---
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height); 
+
+            drawShape();
+            
+            // 繪製現有的所有裂痕
+            cracks.forEach(drawCrack);
+            
+            // 如果完全破碎，顯示 SHATTERED 效果
+            if (target.isShattered) {
+                ctx.fillStyle = 'rgba(239, 68, 68, 0.9)'; // Red overlay
+                ctx.font = 'bold 80px Inter, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText("SHATTERED!", target.x, target.y);
+                
+                // 額外繪製一些破碎的邊緣線條
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+                ctx.lineWidth = 1;
+                for(let i = 0; i < 100; i++) {
+                    ctx.beginPath();
+                    ctx.moveTo(target.x, target.y);
+                    const angle = Math.random() * Math.PI * 2;
+                    const length = Math.min(canvas.width, canvas.height) / 2;
+                    ctx.lineTo(target.x + Math.cos(angle) * length, target.y + Math.sin(angle) * length);
+                    ctx.stroke();
+                }
+            }
+        }
+        
+        // --- 點擊處理函數 ---
+        function handleSmash(event) {
+            if (!currentShape) {
+                showMessage("請先選擇一個目標！", "bg-yellow-500", 1500);
+                return;
+            }
+            if (target.isShattered) {
+                showMessage("目標已破碎，請重置！", "bg-red-500", 1500);
+                return;
+            }
+
+            // 啟用 Audio Context
+            if (!isAudioReady) {
+                Tone.start().then(() => { isAudioReady = true; });
+            }
+
+            // 計算點擊位置相對於 Canvas 的座標
+            const rect = canvas.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+
+            let isHit = false;
+            
+            // 點擊偵測邏輯
+            if (currentShape === 'circle' || currentShape === 'target') {
+                // 圓形偵測
+                const distance = Math.sqrt(Math.pow(x - target.x, 2) + Math.pow(y - target.y, 2));
+                isHit = distance <= target.radius;
+            } else {
+                // 矩形邊界盒偵測 (適用於 square, heart, image)
+                isHit = x >= target.boundX && x <= target.boundX + target.boundW && 
+                        y >= target.boundY && y <= target.boundY + target.boundH;
+            }
+            
+            if (isHit) {
+                // 命中目標
+                if (isAudioReady) {
+                    // 隨機音高變化，讓破碎聲聽起來更多樣
+                    breakSynth.triggerAttackRelease(Math.random() > 0.5 ? "8n" : "16n", Tone.now(), Math.random() * 0.5 + 0.5); 
+                }
+                
+                target.hits++;
+                
+                // 產生一個新的裂痕數據
+                const newCrack = {
+                    x: x,
+                    y: y,
+                    color: 'rgba(239, 68, 68, 0.8)', // 紅色裂痕
+                    angleOffset: Math.random() * Math.PI * 2 
+                };
+                cracks.push(newCrack);
+
+                // 檢查是否完全破碎
+                if (target.hits >= target.maxHits) {
+                    target.isShattered = true;
+                    showMessage("目標完全破碎！🎉 壓力釋放完畢！", "bg-red-500", 3000);
+                } else {
+                    showMessage("砰！命中目標。繼續！", "bg-green-500", 1000);
+                }
+            } else {
+                // 未命中目標
+                if (isAudioReady) {
+                    breakSynth.triggerAttackRelease("32n"); 
+                }
+                showMessage("錯過了！請集中注意力。", "bg-yellow-500", 1000);
+            }
+
+            // 更新視覺效果
+            draw();
+        }
+
+        // --- 訊息顯示邏輯 ---
+        let messageTimeout;
+        function showMessage(text, colorClass, duration = 2000) {
+            clearTimeout(messageTimeout);
+            messageBox.textContent = text;
+            // 動態替換背景顏色類
+            messageBox.className = messageBox.className.replace(/bg-[a-z]+-\d+/g, colorClass);
+            messageBox.classList.add('message-show');
+            
+            messageTimeout = setTimeout(() => {
+                messageBox.classList.remove('message-show');
+            }, duration); 
+        }
+        
+        // --- 目標選擇函數 ---
+        function selectShape(shapeType) {
+            currentShape = shapeType;
+            // 隱藏初始提示
+            initialPrompt.style.opacity = '0';
+            setTimeout(() => { initialPrompt.style.display = 'none'; }, 500);
+
+            resetTarget(false); // 重設狀態，但不清除提示
+            
+            // 清除所有按鈕的選中樣式
+            [selectCircleBtn, selectTargetBtn, selectSquareBtn, selectHeartBtn].forEach(btn => {
+                btn.classList.remove('bg-blue-800', 'bg-purple-800', 'bg-yellow-800', 'bg-red-800');
+            });
+
+            // 設定選中的按鈕樣式
+            let msg = "";
+            let btnToHighlight;
+            switch(shapeType) {
+                case 'circle': msg = "已選取圓形目標。"; btnToHighlight = selectCircleBtn; break;
+                case 'target': msg = "已選取靶心圖案。"; btnToHighlight = selectTargetBtn; break;
+                case 'square': msg = "已選取方形目標。"; btnToHighlight = selectSquareBtn; break;
+                case 'heart': msg = "已選取心碎目標。"; btnToHighlight = selectHeartBtn; break;
+                case 'image': msg = "已選取上傳圖像作為目標。"; break;
+            }
+            if (btnToHighlight) {
+                 btnToHighlight.classList.add(`bg-${btnToHighlight.id.replace('select', '').toLowerCase().replace('target', 'purple').replace('circle', 'blue').replace('square', 'yellow').replace('heart', 'red')}-800`);
+            }
+            
+            resizeCanvas(); // 重新計算邊界盒和尺寸
+            showMessage(msg + "開始敲擊！", "bg-green-500", 1500);
+        }
+        
+        // --- 圖像上傳處理 ---
+        imageUploadInput.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            uploadedImage = new Image();
+            const reader = new FileReader();
+            
+            reader.onload = (e) => {
+                uploadedImage.onload = () => {
+                    selectShape('image');
+                };
+                uploadedImage.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        // --- 重置函數 ---
+        function resetTarget(showPrompt = true) {
+            cracks = [];
+            target.hits = 0;
+            target.isShattered = false;
+            uploadedImage = null;
+            imageUploadInput.value = ''; // 清除檔案輸入
+            
+            if (showPrompt) {
+                currentShape = null; // 清除選擇
+                initialPrompt.style.display = 'flex';
+                initialPrompt.style.opacity = '1';
+                // 清除所有按鈕的選中樣式
+                [selectCircleBtn, selectTargetBtn, selectSquareBtn, selectHeartBtn].forEach(btn => {
+                    btn.classList.remove('bg-blue-800', 'bg-purple-800', 'bg-yellow-800', 'bg-red-800');
+                });
+                showMessage("目標已重置。請重新選擇！", "bg-gray-500", 2000);
+            }
+            
+            resizeCanvas(); // 重新繪製
+        }
+
+        // --- 事件監聽器 ---
+        window.addEventListener('resize', resizeCanvas);
+        canvas.addEventListener('click', handleSmash);
+        selectCircleBtn.addEventListener('click', () => selectShape('circle'));
+        selectTargetBtn.addEventListener('click', () => selectShape('target'));
+        selectSquareBtn.addEventListener('click', () => selectShape('square'));
+        selectHeartBtn.addEventListener('click', () => selectShape('heart'));
+        resetButton.addEventListener('click', () => resetTarget(true));
+        
+        // 初始化
+        resizeCanvas();
+        draw(); 
+
+    </script>
+</body>
+</html>
